@@ -1,0 +1,171 @@
+function [points,intensity] = readpoints(pc_path)
+disp(pc_path);
+    if contains(lower(pc_path), lower("CADC"))
+        fid = fopen(pc_path);
+        data = fread(fid,'single');
+        data = reshape(data,4,[]); 
+        fclose(fid); 
+        points = data(1:3,:)';
+        intensity = data(4,:)';
+    elseif contains(lower(pc_path), lower("WADS"))
+        fid = fopen(pc_path);
+        data = fread(fid,'single');
+        data = reshape(data,4,[]);
+        fclose(fid);
+        points = data(1:3,:)';
+        intensity = data(4,:)';
+    elseif contains(lower(pc_path), lower("C:\"))
+        fid = fopen(pc_path);
+        data = fread(fid,'single');
+        data = reshape(data,6,[]);
+        fclose(fid);
+        points = data(1:3,:)';
+        intensity = data(4,:)';
+    elseif contains(lower(pc_path), lower("RADIATE"))
+        p = readmatrix(pc_path);
+        points = p(:,1:3);
+        intensity = p(:,4);
+    else
+        disp("error in readpoints");
+    end
+end
+
+
+function [normal_ps,snow_ps] = ROR(points,radius,minNeighbors)
+    kdtree = KDTreeSearcher(points);   
+    idx = rangesearch(kdtree, points, radius);
+    validPoints = false(size(points, 1), 1); 
+    for i = 1:length(idx)
+        if numel(idx{i}) >= minNeighbors
+            validPoints(i) = true;
+        end
+    end
+    normal_ps = points(validPoints, :);
+    snow_ps = points(~validPoints, :);
+end
+
+function [normal_ps,snow_ps] = DROR(points,SRmin,beta,alpha)
+    distances = sqrt(sum(points.^2, 2));  
+    radii = beta * distances * alpha;
+    radii(distances < SRmin) = SRmin;
+    kdtree = KDTreeSearcher(points); 
+    keep_points = true(size(points, 1), 1);
+    for i = 1:size(points, 1)
+        point = points(i, :);   
+        radius = radii(i);  
+        idx = rangesearch(kdtree, point, radius);
+        num_neighbors = length(idx{1});
+        if num_neighbors < 3
+            keep_points(i) = false;
+        end
+    end
+    normal_ps = points(keep_points, :);
+    snow_ps = points(~keep_points, :);
+end
+
+function [normal_ps,snow_ps] = SOR(points,K,Ms)
+    [idx, dist] = knnsearch(points, points, 'K', K + 1);
+
+    dist = dist(:, 2:end);
+    meanDist = mean(dist, 2);
+    meanOfMeanDist = mean(meanDist);
+    stdOfMeanDist = std(meanDist);
+    Tg = meanOfMeanDist + Ms * stdOfMeanDist;
+
+    pointsToKeep = meanDist <= Tg;
+    pointsNoKeep = meanDist > Tg;
+
+    normal_ps = points(pointsToKeep, :);
+    snow_ps = points(pointsNoKeep, :);
+end
+
+function [normal_ps,snow_ps] = DSOR(points, mean_k, std_mul, range_mul)
+    kd_tree = KDTreeSearcher(points);
+    [idx, dists] = knnsearch(kd_tree, points, 'K', mean_k);
+    mean_distances = mean(dists(:, 2:end), 2);
+    mean_dist = mean(mean_distances);
+    stddev = std(mean_distances);
+    distance_threshold = mean_dist + std_mul * stddev;
+    ranges = sqrt(sum(points.^2, 2));
+    dynamic_thresholds = distance_threshold * range_mul .* ranges;
+    is_inlier = mean_distances < dynamic_thresholds;
+    snow_ps = points(~is_inlier, :);
+    normal_ps = points(is_inlier, :);
+end
+
+function [normal_ps, snow_ps] = DDIOR(points,intensity,k)
+    i_normalized = normalize(intensity, 'range', [0 1]);
+    dis = sqrt(sum(points.^2, 2));
+    Td = max(dis)/2;
+    Ti = 0.3;
+    c1 = dis < Td;
+    points = points(c1,:);
+    i_normalized = i_normalized(c1);
+    c2 = i_normalized < Ti;
+    points = points(c2,:);
+    i_normalized = i_normalized(c2);
+    [idx, dist] = knnsearch(points, points, 'K', k + 1);
+    dist = dist(:, 2:end);
+    meanDist = mean(dist, 2);
+    meanOfMeanDist = mean(meanDist);
+    alphai = 0.1*i_normalized;
+    alphar = zeros(size(dis));
+    alphar(dis >= 0 & dis < 10) = 0.016;
+    alphar(dis >= 10 & dis < 20) = 0.018;
+    alphar(dis >= 20 & dis < 30) = 0.020;
+    alphar(dis >= 30 & dis < 40) = 0.022;
+    alphar(dis >= 40 & dis < 50) = 0.024;
+    alphar(dis >= 50 & dis < 60) = 0.026;
+    alphar(dis >= 60 & dis < 70) = 0.028;
+    alphar(dis >= 70 & dis < 80) = 0.030;
+    alphar(dis >= 80 & dis < 90) = 0.032;
+    alphar(dis>= 90) = 0.034;
+    keep_points = true(size(points, 1), 1);
+    for i = 1:size(points,1)
+        Tn = (alphar(i) + alphai(i)) * meanOfMeanDist * dis(i);
+        if meanDist(i) >= Tn
+            keep_points(i) = false;
+        end
+    end
+    normal_ps = points(keep_points, :);
+    snow_ps = points(~keep_points, :);
+end
+
+function pointsInradius = findPointsWithinRadius(points, radius)
+    points_xy = points(:,1:2);
+    distances = sqrt(sum((points_xy).^2, 2));
+    
+    withinRadius = distances <= radius;
+    
+    pointsInradius = points(withinRadius, :);
+end
+
+function drawRectangularBox(x_range, y_range, z_range)
+
+
+    vertices = [
+        x_range(1), y_range(1), z_range(1);
+        x_range(1), y_range(2), z_range(1);
+        x_range(2), y_range(2), z_range(1);
+        x_range(2), y_range(1), z_range(1);
+        x_range(1), y_range(1), z_range(2);
+        x_range(1), y_range(2), z_range(2);
+        x_range(2), y_range(2), z_range(2);
+        x_range(2), y_range(1), z_range(2);
+    ];
+
+    faces = [
+        1, 2, 3, 4;
+        5, 6, 7, 8;
+        1, 2, 6, 5;
+        2, 3, 7, 6;
+        3, 4, 8, 7;
+        4, 1, 5, 8;
+    ];
+
+    figure;
+    patch('Vertices', vertices, 'Faces', faces, ...
+          'FaceColor', 'white', 'FaceAlpha', 0, 'LineWidth', 1 ,'LineStyle', '--'); % 设置颜色和透明度
+    axis equal;
+end
+
